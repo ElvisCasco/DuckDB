@@ -1,0 +1,812 @@
+---
+title: "DuckDB Examples"
+author: "Elvis Casco"
+crossref:
+  fig-title: Gráfico     # (default is "Figure")
+  tbl-title: Tabla     # (default is "Table")
+  fig-prefix: Gráfico   # (default is "Figure")
+  tbl-prefix: Tabla    # (default is "Table")
+format:
+    # html:
+    #     toc: true
+    #     code-fold: true
+    # pdf: 
+    #     documentclass: report
+    #     classoption: landscape
+    #     geometry:
+    #       - top=5mm
+    #       - left=10mm
+    #       - right=10mm
+    #     echo: false
+    #     warnings: false
+    #     keep-ipynb: true
+    docx: 
+        documentclass: report
+        classoption: landscape
+        geometry:
+        - top=5mm
+        - left=10mm
+        - right=10mm
+        echo: false
+        warnings: false
+        keep-ipynb: true
+jupyter: python3
+---
+
+# DuckDB Tricks - Part 1
+
+[DuckDB Tricks Part 1](https://duckdb.org/2024/08/19/duckdb-tricks-part-1.html)
+
+## Creating the Example Data Set
+
+```{python}
+import duckdb
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE example (s STRING, x DOUBLE);
+    INSERT INTO example VALUES ('foo', 10/9), ('bar', 50/7), ('qux', 9/4);
+    COPY example TO 'example.csv';
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    COPY (FROM VALUES ('foo', 10/9), ('bar', 50/7), ('qux', 9/4) t(s, x))
+    TO 'example.csv';
+    """)
+)
+```
+
+## Pretty-Printing Floating-Point Numbers
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT x
+    FROM 'example.csv';
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT x::DECIMAL(15, 3) AS x
+    FROM 'example.csv';
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT printf('%.3f', x)
+    FROM 'example.csv';
+    """)
+)
+```
+
+## Copying the Schema of a Table
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE example AS
+        FROM 'example.csv';
+    CREATE OR REPLACE TABLE tbl AS
+        FROM example
+        LIMIT 0;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    DESCRIBE tbl;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE example3(s VARCHAR, x DOUBLE);
+    """)
+)
+```
+
+## Shuffling Data
+
+```{python}
+(
+    duckdb.sql(f"""
+    FROM 'example.csv' ORDER BY random();
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE example AS FROM 'example.csv';
+    FROM example ORDER BY hash(rowid + 42);
+    """)
+)
+```
+
+## Specifying Types in the CSV Loader
+
+```{python}
+# (
+#     duckdb.sql(f"""
+#     CREATE OR REPLACE TABLE example AS
+#         FROM read_csv('example.csv', types = {'x': 'DECIMAL(15, 3)'});
+#     """)
+# )
+```
+
+```{python}
+# (
+#     duckdb.sql(f"""
+#     FROM example;
+#     """)
+# )
+```
+
+## Updating CSV Files In-Place
+
+```{python}
+# (
+#     duckdb.sql(f"""
+#     COPY (SELECT s FROM 'example.csv') TO 'example.csv';
+#     """)
+# )
+```
+
+# DuckDB Tricks - Part 2
+
+[DuckDB Tricks – Part 2](https://duckdb.org/2024/10/11/duckdb-tricks-part-2)
+
+## Fixing Timestamps in CSV File
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE schedule_raw AS
+        SELECT * FROM 'https://duckdb.org/data/schedule.csv';
+
+    SELECT * FROM schedule_raw;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE schedule_cleaned AS
+        SELECT
+            timeslot
+                .regexp_replace(' (\\d+)(am|pm)$', ' \\1.00\\2')
+                .strptime('%Y-%m-%d %H.%M%p') AS timeslot,
+            location,
+            event
+        FROM schedule_raw;
+    SELECT * FROM schedule_cleaned;
+    """)
+)
+```
+
+## Filling in Missing Values
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE timeslot_location_combinations AS 
+        SELECT timeslot, location
+        FROM (SELECT DISTINCT timeslot FROM schedule_cleaned)
+        CROSS JOIN (SELECT DISTINCT location FROM schedule_cleaned);
+
+    CREATE OR REPLACE TABLE schedule_filled AS
+        SELECT timeslot, location, coalesce(event, '<empty>') AS event
+        FROM timeslot_location_combinations
+        LEFT JOIN schedule_cleaned
+            USING (timeslot, location)
+        ORDER BY ALL;
+
+    SELECT * FROM schedule_filled;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    WITH timeslot_location_combinations AS (
+        SELECT timeslot, location
+        FROM (SELECT DISTINCT timeslot FROM schedule_cleaned)
+        CROSS JOIN (SELECT DISTINCT location FROM schedule_cleaned)
+    )
+    SELECT timeslot, location, coalesce(event, '<empty>') AS event
+    FROM timeslot_location_combinations
+    LEFT JOIN schedule_cleaned
+        USING (timeslot, location)
+    ORDER BY ALL;
+    """)
+)
+```
+
+## Repeated Data Transformation Steps
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE schedule AS
+        SELECT * FROM 'https://duckdb.org/data/schedule.csv';
+
+    CREATE OR REPLACE TABLE schedule AS
+        SELECT
+            timeslot
+                .regexp_replace(' (\\d+)(am|pm)$', ' \\1.00\\2')
+                .strptime('%Y-%m-%d %H.%M%p') AS timeslot,
+            location,
+            event
+        FROM schedule;
+
+    CREATE OR REPLACE TABLE schedule AS
+        WITH timeslot_location_combinations AS (
+            SELECT timeslot, location
+            FROM (SELECT DISTINCT timeslot FROM schedule)
+            CROSS JOIN (SELECT DISTINCT location FROM schedule)
+        )
+        SELECT timeslot, location, coalesce(event, '<empty>') AS event
+        FROM timeslot_location_combinations
+        LEFT JOIN schedule_cleaned
+            USING (timeslot, location)
+        ORDER BY ALL;
+
+    SELECT * FROM schedule;
+    """)
+)
+```
+
+## Computing Checksums for Columns
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT bit_xor(md5_number(COLUMNS(*)::VARCHAR))
+    FROM schedule;
+    """)
+)
+```
+
+## Creating a Macro for the Checksum Query
+
+```{python}
+# (
+#     duckdb.sql(f"""
+#     CREATE OR REPLACE MACRO checksum(table_name) AS TABLE
+#         SELECT bit_xor(md5_number(COLUMNS(*)::VARCHAR))
+#         FROM query_table(table_name);
+#     FROM checksum('schedule');
+#     """)
+# )
+```
+
+# Semi, Anti, and Natural Joins in DuckDB SQL
+
+## Create data
+
+```{python}
+import duckdb
+import pandas as pd
+conn = duckdb.connect()
+
+users = {
+    'User_ID': [123, 124, 125],
+    'User_Name': ['Bob', 'Alice', 'Carrie'],
+}
+
+users = pd.DataFrame(users)
+users
+
+orders = {
+    'User_ID': [123, 125, 126],
+    'Order_ID': [333, 222, 111],
+}
+
+orders = pd.DataFrame(orders)
+orders
+
+```
+
+## Semi Join
+
+```{python}
+query = """
+select *
+from users U
+SEMI JOIN orders O
+ON (U.User_ID = O.User_ID);
+"""
+
+duckdb.sql(query).df()
+```
+
+## Anti Join
+
+```{python}
+query = """
+select *
+from users U
+SEMI JOIN orders O
+ON (U.User_ID = O.User_ID);
+"""
+
+duckdb.sql(query).df()
+```
+
+## Natural Join
+
+```{python}
+query = """
+select *
+from users U
+NATURAL JOIN orders O;
+"""
+
+duckdb.sql(query).df()
+```
+
+# External Aggregation in DuckDB
+
+[Memory Management in DuckDB](https://duckdb.org/2024/07/09/memory-management)
+
+[External Aggregation in DuckDB](https://duckdb.org/2024/03/29/external-aggregation.html)
+
+## Experiments
+
+Data: https://blobs.duckdb.org/data/G1_1e9_2e0_0_0.csv.zst
+
+```{python}
+(
+    duckdb.sql(f"""
+    SET preserve_insertion_order = false;
+    CREATE TABLE y (
+        id1 VARCHAR, id2 VARCHAR, id3 VARCHAR,
+        id4 INT, id5 INT, id6 INT, v1 INT, v2 INT,
+        v3 FLOAT);
+    COPY y FROM 'G1_1e9_2e0_0_0.csv.zst' (FORMAT CSV, AUTO_DETECT true);
+    CREATE TYPE id1ENUM AS ENUM (SELECT id1 FROM y);
+    CREATE TYPE id2ENUM AS ENUM (SELECT id2 FROM y);
+    CREATE TABLE x (
+        id1 id1ENUM, id2 id2ENUM, id3 VARCHAR,
+        id4 INT, id5 INT, id6 INT, v1 INT, v2 INT,
+        v3 FLOAT);
+    INSERT INTO x (SELECT * FROM y);
+    DROP TABLE IF EXISTS y;
+    """)
+)
+```
+
+```{python}
+# Query 1: ~100 unique groups
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE ans AS
+    SELECT id1, sum(v1) AS v1
+    FROM x
+    GROUP BY id1;
+    """)
+)
+```
+
+```{python}
+# Query 2: ~10,000 unique groups
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE ans AS
+    SELECT id1, id2, sum(v1) AS v1
+    FROM x
+    GROUP BY id1, id2;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE ans AS
+    SELECT id3, sum(v1) AS v1, avg(v3) AS v3
+    FROM x
+    GROUP BY id3;
+    """)
+)
+```
+
+# DuckDB Tricks - Part 3
+
+[Code](https://duckdb.org/2024/11/29/duckdb-tricks-part-3.html)
+
+## Excluding Columns from a Table
+
+```{python}
+import duckdb
+(
+    duckdb.sql(f"""
+    DESCRIBE FROM 'services-2024-08.csv';
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    SUMMARIZE FROM 'services-2024-08.csv';
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT * EXCLUDE(min, max, q25, q50, q75) 
+    FROM (SUMMARIZE FROM 'services-2024-08.csv');
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT COLUMNS(c -> c NOT SIMILAR TO 'min|max|q.*') 
+    FROM (SUMMARIZE FROM 'services-2024-08.csv');
+    """)
+)
+```
+
+## Renaming Columns with Pattern Matching
+
+```{python}
+(
+    duckdb.sql(f"""
+    select * from read_csv_auto('services-2024-08.csv', normalize_names=True)
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    DESCRIBE
+    SELECT COLUMNS('RDT')
+    --SELECT  COLUMNS = regexp_replace( COLUMNS,'[^a-zA-Z0-9\s]', ' ', 'g')
+    --FROM (
+    --    SELECT COLUMNS('(.*?)_*$') AS "\1"
+    --    FROM (
+    --    SELECT COLUMNS('(\w*)\W*(\w*)\W*(\w*)') AS "\1_\2_\3"
+    FROM 'services-2024-08.csv'
+    
+    --    )
+    --)
+    --ORDER BY service_company;
+    """)
+)
+```
+
+## Loading with Globbing
+
+```{python}
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE services AS
+        SELECT COLUMNS('(.*?)_*$') 
+        FROM 'services-2024-*.csv';
+    """)
+)
+```
+
+## Reordering Parquet Files
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT avg("Stop:Arrival delay")
+    FROM 'services-*.csv'
+    WHERE "Service:Company" = 'NS'
+        AND "Service:Type" = 'Intercity direct'
+        AND "Stop:Departure time" IS NULL;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT avg("Stop:Arrival delay")
+    FROM services
+    WHERE "Service:Company" = 'NS'
+        AND "Service:Type" = 'Intercity direct'
+        AND "Stop:Departure time" IS NULL;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    EXPORT DATABASE 'railway' (FORMAT PARQUET);
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT avg("Stop:Arrival delay")
+    FROM 'railway/services.parquet'
+    WHERE "Service:Company" = 'NS'
+    AND "Service:Type" = 'Intercity direct'
+    AND "Stop:Departure time" IS NULL;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    COPY
+    (FROM 'railway/services.parquet' ORDER BY "Service:Company", "Service:Type")
+    TO 'railway/services.parquet';
+    """)
+)
+```
+
+## Hive Partitioning
+
+```{python}
+(
+    duckdb.sql(f"""
+    COPY services
+    TO 'services-parquet-hive'
+    (FORMAT PARQUET, PARTITION_BY ("Service:Company", "Service:Type"));
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    SELECT avg("Stop:Arrival delay")
+    FROM read_parquet(
+            'services-parquet-hive/**/*.parquet',
+            hive_partitioning = true
+        )
+    WHERE "Service%3ACompany" = 'NS'
+        AND "Service%3AType" = 'Intercity direct'
+        AND "Stop:Departure time" IS NULL;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+    COPY services
+    TO 'services-csv-hive'
+    (FORMAT CSV, PARTITION_BY ("Service:Company", "Service:Type"));
+
+    SELECT avg("Stop:Arrival delay")
+    FROM read_csv('services-csv-hive/**/*.csv', hive_partitioning = true)
+    WHERE "Service%3ACompany" = 'NS'
+        AND "Service%3AType" = 'Intercity direct'
+        AND "Stop:Departure time" IS NULL;
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```
+
+```{python}
+(
+    duckdb.sql(f"""
+
+    """)
+)
+```

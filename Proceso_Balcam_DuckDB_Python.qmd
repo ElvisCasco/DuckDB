@@ -1,0 +1,758 @@
+---
+title: "Mejoras al proceso de Balcam"
+author: "Elvis Casco"
+crossref:
+  fig-title: Gráfico     # (default is "Figure")
+  tbl-title: Tabla     # (default is "Table")
+  fig-prefix: Gráfico   # (default is "Figure")
+  tbl-prefix: Tabla    # (default is "Table")
+format:
+    # html:
+    #     toc: true
+    #     code-fold: true
+    # pdf: 
+    #     documentclass: report
+    #     classoption: landscape
+    #     geometry:
+    #       - top=5mm
+    #       - left=10mm
+    #       - right=10mm
+    #     echo: false
+    #     warnings: false
+    #     keep-ipynb: true
+    docx: 
+        documentclass: report
+        classoption: landscape
+        geometry:
+        - top=5mm
+        - left=10mm
+        - right=10mm
+        echo: false
+        warnings: false
+        keep-ipynb: true
+jupyter: python3
+---
+
+```{python}
+import duckdb
+import glob
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import polars as pl
+import pandas as pd
+import pyarrow
+import reader
+import time
+
+from great_tables import GT
+from math import ceil
+from multiprocessing import Pool
+from typing import Dict, Any
+from typing import Optional
+
+start0 = time.time()
+```
+
+```{python}
+## Carpetas
+wd_ie = "\\\\srvfs02\\Departamento de Investigacion Economica\\Departamento\\Balcam\\"
+wd_oc = "\\\\Srvfs02\\oc\\Balcam\\"
+## Lectura de archivos .csv
+wd_csv = wd_oc + "csv/"
+## Guardar resultados en servidor de IE, por espacio
+wd_res = wd_ie + "Resultados/"
+wd_parquet = wd_ie + "Resultados/parquet/"
+wd_all = wd_ie + "Resultados/Years/"
+```
+
+```{python}
+# pl.read_parquet("C:/Users/ec109004/Documents/My Received Files/2023_01_BALCAM1.parquet")
+```
+
+\pagebreak
+
+Con el fin de volver más eficiente la descarga de los datos de la base Balcam, se sostuvieron reuniones con TyC llegando al acuerdo de descargar los archivos directamente de la base de Balcam, usando los datos guardados en la carpeta "//srvfs02/IE/Departamento/Balcam/Database" y en formato `.parquet`, que permite un menor tamaño de los archivo y una lectura más rápida; se toma en cuenta para ello la consulta de los datos a nivel de código para las variables que lo permiten, en vez de que sea la descripción de la variable tal y como se realiza actualmente mediante descarga en archivos `.csv`.
+
+Para que las variables numéricas sean sustituidas por su descripción, se crearon diccionarios, disponibles en la carpeta "//srvfs02/IE/Departamento/Balcam/Database/Catálogos". Por el momento, se presentarán resultados en tablas, usando los valores numéricos; en un proceso posterior se sustituirán dichos valores por su descripción.
+
+```{python}
+# conn = duckdb.connect("Balcam",read_only=False)
+```
+
+# Procedimiento
+
+La descarga de los datos se ejecuta directamente desde la base, y comprende consultas consolidadas de manera semestral hasta noviembre de 2023 y mensual a partir de diciembre 2023; este método de descarga implica el supuesto que no se hacen cambios en la información antes del año actual y en caso que se produzcan, solamente se ejecuta la consulta para el período correspondiente. Debido a que en el mes en curso si se estarían realizando modificaciones, la consulta para dicho mes podría ejecutarse de forma automática cada día.
+
+La descarga de archivos en formato `.parquet` implica que la infomación se guarda de manera compacta, con rapidez aceptable, y además la lectura y consolidación de los archivos puede ejecutarse de manera más eficiente. Respecto a los campos que se tenían previamente, se incorporó la lectura de la variable "género", misma que podría ser útil para el análisis de remesas.
+
+Se crean adicionalmente variables derivadas a partir de la fecha; mediante este procedimiento, se crea la tabla `df_DuckDB` que contendrá todas las variables. Este es el proceso que por el momento consume más recursos de memoria; actualmente el consumo de memoria RAM relativo a la carga de los datos es de aproximadamente 100 gygabytes (gb), por lo que este procedimiento no puede realizarse en una computadora convencional, cuyos recursos en términos de memoria RAM tienen un máximo de 64 gb.
+
+En los datos finales se excluyen las variable `declaracionnumero` y `transaccionagentecambiario`, en vista que no aportan información de utilidad
+
+El tiempo de ejecución de este proceso es de:
+
+```{python}
+start = time.time()
+
+(
+    duckdb.sql(f"""
+    CREATE OR REPLACE TABLE df_DuckDB AS
+    SELECT
+    fechacontable,cveagentecambiario,cvepais,cvedepartamento,cveMunicipio,cveorigendestino,Actividad,monto,cvemoneda,cvetipoErogacion,cvemediopago,cvetipoclienteagente,identidad_rtn,NOMBRECLIENTEAGENTE,genero,tasacambio,cvecanalatencion,cvetipotransaccion,cverubro,fechatransaccion,Identidad_Beneficiario,
+    year(fechacontable) AS Year,
+    month(fechacontable) AS Month,
+    day(fechacontable) AS Day,
+    dayofweek(fechacontable) AS DayOfWeek,
+    dayofyear(fechacontable) AS DayOfYear,
+    dayofmonth(fechacontable) AS DayOfMonth,
+    week(fechacontable) AS Week,
+    weekday(fechacontable) AS WeekDay
+    FROM "//srvfs02/IE/Departamento/Balcam/Database/*.parquet"
+    """)
+)
+    # SELECT *,
+# LIMIT 100
+# weekday(date)	Numeric weekday synonym (Sunday = 0, Saturday = 6).
+
+# conn.execute("""
+# CREATE OR REPLACE TABLE df_DuckDB AS
+# SELECT *
+# FROM "//srvfs02/IE/Departamento/Balcam/Database/*.parquet"
+# """)
+
+end = time.time()
+length = end - start
+print(length/60, "minutos")
+```
+
+Los nombres de las columnas con las que se pueden hacer consultas son:
+
+```{python}
+df = (
+    duckdb.sql(f"""
+        SELECT *
+        FROM df_DuckDB
+        LIMIT 5
+        """).pl()
+)
+GT(pl.DataFrame(df.columns))
+```
+
+Esto conlleva una mejora significativa respecto al procedimiento ejecutado en Julia que implica la lectura de archivos CSV, puesto que el mismo implicaba la lectura de archivos CSV bastante grandes en cada mes, conversión de la descripción de las variables a valores numéricos con el fin de ahorrar espacio (esto ya se hace automáticamente desde la base) y consolidación de archivos en formato `.parquet` y `.csv`.
+
+La ventaja del procedimiento explicado aquí es que puede aprovecharse códigos utilizados previamente (reciclamiento) para la generación de reportes.
+
+Se presenta a continuación el número de filas (N) que contiene el archivo consolidado:
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT
+            count(*) AS N,
+            FROM df_DuckDB
+            """).pl())
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+Por año (2024 hasta agosto):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT Year,
+            sum(Monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB
+            GROUP BY Year 
+            ORDER BY Year DESC;
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+```{python}
+# (
+#     GT(
+# duckdb.sql(f"""
+#     SELECT
+#     count(*) FILTER (cverubro == 303) AS Remesas,
+#     FROM df_DuckDB
+#             """).pl())
+#     .fmt_integer(columns="Remesas", compact=False)
+# )#     .fmt_integer(columns="Monto", compact=False)
+# )
+    # count(*) FILTER (cverubro == 303) AS Remesas,
+
+```
+
+
+# Resultados: Consulta a nivel de variables
+
+## Una sola variable 
+
+Se utilizará el orden tomado a partir de la lectura de los datos desde los archivos `.parquet`:
+
+### Agente Cambiario (tblbancos.csv)
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT Year,cveagentecambiario,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY Year,cveagentecambiario
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+### País (tblpais.csv):
+
+Primeros 5 países, de acuerdo al monto.
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvepais,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvepais
+            ORDER BY Monto DESC NULLS LAST
+            """).pl().head(5))
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+### Departamento (TBLDEPARTAMENTO.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvedepartamento,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvedepartamento
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+### Municipio (TBLMUNICIPIO.csv):
+
+Primeros 5 municipios, de acuerdo al monto.
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvedepartamento,cveMunicipio,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvedepartamento,cveMunicipio
+            ORDER BY Monto DESC NULLS LAST
+            """).pl().head(5))
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+### Origen/Destino (TBLORIGENDESTINO.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cveorigendestino,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cveorigendestino
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+### Actividad Económica (TBLActividad.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT Actividad,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY Actividad
+            ORDER BY Actividad DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+### Moneda (tblmoneda.csv):
+
+Primeras 5 monedas, de acuerdo al monto.
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvemoneda,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvemoneda
+            ORDER BY Monto DESC NULLS LAST
+            """).pl().head(5))
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+### Tipo de Erogación (TBLtipoErogacion.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvetipoErogacion,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvetipoErogacion
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+### Medio de pago (TBLMEDIOPAGO.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvemediopago,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvemediopago
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+- Tipo de Agente (TBLtipoclienteagente.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvetipoclienteagente,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvetipoclienteagente
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+- Género (TBLgenero.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT genero,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY genero
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+- Canal de atención (tblcanal.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvecanalatencion,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvecanalatencion
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+- Tipo de Transacción (TBLtipotransaccion.csv):
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cvetipotransaccion,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cvetipotransaccion
+            ORDER BY Monto DESC NULLS LAST
+            """).pl())
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+- Rubro (TBLrubro.csv):
+
+Primeros 5 rubros, de acuerdo al monto.
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT cverubro,
+            sum(monto) AS Monto,
+            count(*)  as N
+            FROM df_DuckDB 
+            GROUP BY cverubro
+            ORDER BY Monto DESC NULLS LAST
+            """).pl().head(25))
+    .fmt_integer(columns="Monto", compact=False)
+    .fmt_integer(columns="N", compact=False)
+)
+```
+
+## Combinación de varias variables
+
+Como ejemplos, se reproduce la consulta de montos a nivel de fecha, por las variables que se consideran más importantes; sin embargo, puede realizarse cualquier combinación de las mismas y el tiempo de ejecución depende de la complejidad de cada consulta; por razones de espacio, se considera mostrar solamente las últimas 5 filas:
+
+- Año, Mes, DayOfWeek
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT Year,Month,DayOfWeek,
+            sum(monto) AS Monto
+            FROM df_DuckDB 
+            GROUP BY Year,Month,DayOfWeek
+            ORDER BY Year,Month,DayOfWeek,Monto NULLS LAST
+            """).pl().tail(5))
+    .fmt_integer(columns="Monto", compact=False)
+)
+```
+
+- Año, Mes, Semana del año
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT Year,Month,Week,
+            sum(monto) AS Monto
+            FROM df_DuckDB 
+            GROUP BY Year,Month,Week
+            ORDER BY Year,Month,Week,Monto NULLS LAST
+            """).pl().tail(5))
+    .fmt_integer(columns="Monto", compact=False)
+)
+```
+
+- Fecha, agente cambiario y tipo de transacción
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT Year,Month,cveagentecambiario,cvetipotransaccion,
+            sum(monto) AS Monto
+            FROM df_DuckDB 
+            GROUP BY Year,Month,cveagentecambiario,cvetipotransaccion
+            ORDER BY Year,Month,cvetipotransaccion,Monto NULLS LAST
+            """).pl().tail(5))
+    .fmt_integer(columns="Monto", compact=False)
+)
+```
+
+- Fecha, rubro, solo egresos
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT Year,Month,cvetipotransaccion,cverubro, 
+            sum(monto) AS Monto
+            FROM df_DuckDB 
+            GROUP BY Year,Month,cvetipotransaccion,cverubro
+            HAVING cvetipotransaccion == 2
+            ORDER BY Year,Month,cvetipotransaccion,Monto
+            """).pl().tail(5))
+    .fmt_integer(columns="Monto", compact=False)
+)
+```
+
+- Fecha y género
+
+```{python}
+(
+    GT(
+        duckdb.sql(f"""
+            SELECT Year,Month,genero, 
+            sum(monto) AS Monto
+            FROM df_DuckDB 
+            GROUP BY Year,Month,genero
+            ORDER BY Year,Month,genero,Monto DESC NULLS LAST
+            """).pl().tail(5))
+    .fmt_integer(columns="Monto", compact=False)
+)
+```
+
+```{python}
+
+```
+
+# Resultados: Tiempo de Ejecución 
+
+Para todo el procedimiento explicado el tiempo de ejecución fue de:
+
+```{python}
+
+end0 = time.time()
+length = end0 - start0
+print(length/60, "minutos")
+```
+
+Esto implica que los reportes pueden generarse con mayor rapidez si se utiliza este nuevo procedimiento.
+
+Adicional a lo anterior, se pueden agregar procedimientos personalizados que impliquen el uso de tablas y gráficos para el análisis específico de variables mediante mecanismos de filtración y cálculos personalizados.
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
+
+
+
+```{python}
+
+```
